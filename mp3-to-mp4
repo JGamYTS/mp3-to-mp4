@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [-i IMAGE] [-h] <input.mp3> [output.mp4]
+
+Creates an MP4 from an MP3 and a still image.
+
+Options:
+  -i, --image FILE   Use FILE as the cover image instead of the MP3's
+                     embedded cover art.
+  -h, --help         Show this help.
+
+If OUTPUT is omitted, it defaults to the input filename with .mp4.
+If -i is not given, the embedded cover art in the MP3 is used.
+EOF
+}
+
+# ---- Parse arguments (options may appear anywhere) ----------------------------
+IMAGE=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -i|--image)
+      if [ $# -lt 2 ]; then
+        echo "Error: $1 requires a file argument" >&2
+        exit 1
+      fi
+      IMAGE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break
+      ;;
+    -*)
+      echo "Error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ ${#POSITIONAL[@]} -lt 1 ]; then
+  echo "Error: missing input file" >&2
+  usage >&2
+  exit 1
+fi
+
+INPUT_MP3="${POSITIONAL[0]}"
+OUTPUT_MP4="${POSITIONAL[1]:-${INPUT_MP3%.*}.mp4}"
+
+# ---- Validate inputs ----------------------------------------------------------
+[ -f "$INPUT_MP3" ] || { echo "Error: file not found: $INPUT_MP3" >&2; exit 1; }
+if [ -n "$IMAGE" ] && [ ! -f "$IMAGE" ]; then
+  echo "Error: image file not found: $IMAGE" >&2
+  exit 1
+fi
+
+# ---- Prepare cover art --------------------------------------------------------
+TMP_DIR=""
+cleanup() {
+  if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT
+
+if [ -n "$IMAGE" ]; then
+  COVER_ART="$IMAGE"
+else
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mp3tomp4.XXXXXX")"
+  COVER_ART="$TMP_DIR/cover.png"
+  # Re-encode to PNG so any embedded codec (mjpeg, png, bmp...) works.
+  if ! ffmpeg -y -loglevel error -i "$INPUT_MP3" -an -vcodec png "$COVER_ART"; then
+    echo "Error: no embedded cover art found in $INPUT_MP3" >&2
+    echo "Hint: supply your own image with:  $(basename "$0") -i cover.jpg \"$INPUT_MP3\"" >&2
+    exit 1
+  fi
+fi
+
+# ---- Build the MP4 ------------------------------------------------------------
+ffmpeg -y -loglevel error \
+  -loop 1 -framerate 1 -i "$COVER_ART" \
+  -i "$INPUT_MP3" \
+  -map 0:v:0 -map 1:a:0 \
+  -c:v libx264 -tune stillimage -pix_fmt yuv420p \
+  -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
+  -c:a aac -b:a 192k \
+  -shortest -movflags +faststart \
+  "$OUTPUT_MP4"
+
+echo "Wrote $OUTPUT_MP4"
